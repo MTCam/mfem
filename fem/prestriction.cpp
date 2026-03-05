@@ -309,27 +309,86 @@ void ParL2FaceRestriction::DoubleValuedConformingMult(
    MFEM_ASSERT(
       m == L2FaceValues::DoubleValued,
       "This method should be called when m == L2FaceValues::DoubleValued.");
-
    Vector face_nbr_data = GetLVectorFaceNbrData(fes, x, type);
 
    // Early return only after calling ParGridFunction::ExchangeFaceNbrData,
    // otherwise MPI communication can hang.
-   if (nf == 0) { return; }
+   if (nf == 0) { std::cout << "Early return" << std::endl; return; }
 
    // Assumes all elements have the same number of dofs
    const int nface_dofs = face_dofs;
    const int vd = vdim;
    const bool t = byvdim;
    const int threshold = ndofs;
-   const int nsdofs = pfes.GetFaceNbrVSize();
+   // Original code:
+   //   const int nsdofs = pfes.GetFaceNbrVSize();
+   // New code:
+   const int nsdofs_v = pfes.GetFaceNbrVSize();
+   MFEM_VERIFY(vd > 0, "vdim must be positive.");
+   MFEM_VERIFY(nsdofs_v % vd == 0,
+               "FaceNbrVSize must be divisible by vdim.");
+   const int nsdofs = nsdofs_v / vd; // scalar dofs in face-neighbor space
+   MFEM_VERIFY(face_nbr_data.Size() == nsdofs_v,
+               "face_nbr_data size mismatch vs FaceNbrVSize.");
+   // End new code
+ 
    auto d_indices1 = scatter_indices1.Read();
    auto d_indices2 = scatter_indices2.Read();
    auto d_x = Reshape(x.Read(), t?vd:ndofs, t?ndofs:vd);
-   auto d_x_shared = Reshape(face_nbr_data.Read(),
+   const real_t *fnd = face_nbr_data.Read();
+   const int ndofs_e = pfes.GetTypicalFE()->GetDof();
+   auto d_x_shared = Reshape(fnd,
                              t?vd:nsdofs, t?nsdofs:vd);
    auto d_y = Reshape(y.Write(), nface_dofs, vd, 2, nf);
+   // {
+   //   auto h_idx2 = scatter_indices2.HostRead(); // or Read() if host accessible
+   //   long long min2 = (1LL<<62), max2 = -(1LL<<62);
+   //   long long min_shared = (1LL<<62), max_shared = -(1LL<<62);
+   //   int count_shared = 0;
+   //   int count_oob_scalar = 0;
+   //   int count_oob_vector = 0;
+     
+   //   const int vd = vdim;
+   //   const int threshold = ndofs;
+   //   const int nsdofs_v = pfes.GetFaceNbrVSize();
+   //   const int nsdofs_s = nsdofs_v / vd;
+     
+   //   for (int i = 0; i < nfdofs; ++i)
+   //     {
+   //       const int idx2 = h_idx2[i];
+   //       min2 = std::min<long long>(min2, idx2);
+   //       max2 = std::max<long long>(max2, idx2);
+         
+   //       if (idx2 >= threshold)
+   //         {
+   //           ++count_shared;
+   //           const int s = idx2 - threshold;
+   //           min_shared = std::min<long long>(min_shared, s);
+   //           max_shared = std::max<long long>(max_shared, s);
+             
+   //           if (s < 0 || s >= nsdofs_s) ++count_oob_scalar;
+   //           if (s < 0 || s >= nsdofs_v) ++count_oob_vector;
+   //         }
+   //     }
+     
+   //   if (pfes.GetMyRank() == 0)
+   //     {
+   //       std::cout
+   //         << "idx2 range: [" << min2 << ", " << max2 << "]\n"
+   //         << "shared s=idx2-threshold range: [" << min_shared << ", " << max_shared << "]\n"
+   //         << "threshold=" << threshold
+   //         << " nsdofs_s=" << nsdofs_s
+   //         << " nsdofs_v=" << nsdofs_v << "\n"
+   //         << "count_shared=" << count_shared
+   //         << " count_oob_scalar=" << count_oob_scalar
+   //         << " count_oob_vector=" << count_oob_vector << "\n"
+   //         << std::endl;
+   //     }
+   // }
+   // const int ndofs_e = ndofs;              // scalar dofs per element (MFEM already assumes uniform)
+   // const int B = vd * ndofs_e;             // entries per neighbor element block        
    mfem::forall(nfdofs, [=] MFEM_HOST_DEVICE (int i)
-   {
+    {
       const int dof = i % nface_dofs;
       const int face = i / nface_dofs;
       const int idx1 = d_indices1[i];
@@ -346,8 +405,11 @@ void ParL2FaceRestriction::DoubleValuedConformingMult(
          }
          else if (idx2>=threshold) // shared boundary
          {
-            d_y(dof, c, 1, face) = d_x_shared(t?c:(idx2-threshold),
-                                              t?(idx2-threshold):c);
+           const int base = idx2 - threshold;
+           d_y(dof, c, 1, face) = fnd[base + c*ndofs_e];
+           // const int s_vec = idx2-threshold;
+           // const int s = s_vec / vd;
+           // d_y(dof, c, 1, face) = d_x_shared(t?c:s,t?s:c);
          }
          else // true boundary
          {
